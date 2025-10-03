@@ -1,19 +1,18 @@
+// src/youtubeApi.js
 const fetch = require("node-fetch")
 const fs = require("fs")
 const path = require("path")
 const { readJsonSafe } = require("./storage")
 const storage = require("./storage")
+const rssService = require("./rssService") // <== adicione esta linha!
 
-// lê a config
 const config = readJsonSafe(storage.configPath, {})
 const minDurationSeconds = config.minDurationSeconds || 0
 const maxSearchResults = config.maxSearchResults || 100
 const cacheTtlMinutes = config.cacheTtlMinutes || 15
 
-// caminho do cache de vídeos por canal
 const cachePath = path.join(__dirname, "channelCache.json")
 
-// helper: duration ISO8601 -> seconds
 function isoDurationToSeconds(iso) {
     const match = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/)
     if (!match) return 0
@@ -28,18 +27,33 @@ function getApiKey() {
     return creds.YOUTUBE_API_KEY || ""
 }
 
+// NOVA FUNÇÃO: tenta ler vídeos do cache local se quota for excedida
+function getVideosFromLocalCache(channelId) {
+    try {
+        let cache = {}
+        if (fs.existsSync(cachePath)) {
+            cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"))
+        }
+        if (cache[channelId] && Array.isArray(cache[channelId].videos) && cache[channelId].videos.length > 0) {
+            console.log(`[CACHE-FALLBACK] Usando vídeos do cache local para canal ${channelId} (quota excedida)`)
+            return cache[channelId].videos
+        }
+        return []
+    } catch (err) {
+        console.warn(`[CACHE-FALLBACK] Erro ao ler cache local para canal ${channelId}`, err)
+        return []
+    }
+}
+
 // Função principal para buscar vídeos de um canal
 async function fetchChannelVideosViaApi(channelId) {
     const key = getApiKey()
     if (!key) throw new Error("No API key")
 
-    // tenta carregar cache
     let cache = {}
     try {
         cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"))
-    } catch (err) {
-        // ignora se não existir
-    }
+    } catch (err) {}
 
     const now = Date.now()
     const cacheTtlMs = cacheTtlMinutes * 60 * 1000
@@ -65,6 +79,22 @@ async function fetchChannelVideosViaApi(channelId) {
             const r1 = await fetch(searchUrl)
             if (!r1.ok) {
                 const txt = await r1.text().catch(() => null)
+                // QUOTA EXCEDIDA: tenta cache local e fallback para RSS
+                if (r1.status === 403 && txt && txt.includes("quota")) {
+                    let fallbackCache = getVideosFromLocalCache(channelId)
+                    if (fallbackCache && fallbackCache.length > 0) {
+                        return fallbackCache
+                    } else {
+                        try {
+                            console.warn(`[FALLBACK-RSS] Tentando buscar via RSS canal ${channelId}...`)
+                            let rssVideos = await rssService.fetchChannelVideosViaRSS(channelId)
+                            return rssVideos
+                        } catch (rssErr) {
+                            console.warn(`[FALLBACK-RSS] Falha buscar RSS canal ${channelId}:`, rssErr)
+                            return []
+                        }
+                    }
+                }
                 throw new Error(`search.list failed: ${r1.status} ${txt}`)
             }
 
@@ -74,7 +104,6 @@ async function fetchChannelVideosViaApi(channelId) {
 
             if (!ids.length) break
 
-            // busca detalhes
             const idsParam = ids.join(",")
             const videosUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics,status&id=${encodeURIComponent(idsParam)}&key=${key}`
             const r2 = await fetch(videosUrl)
@@ -134,7 +163,20 @@ async function fetchChannelVideosViaApi(channelId) {
         return filteredVideos
     } catch (err) {
         console.error(`[ERROR] fetchChannelVideosViaApi canal ${channelId}:`, err)
-        return []
+        // Tenta fallback: cache local
+        let fallbackCache = getVideosFromLocalCache(channelId)
+        if (fallbackCache && fallbackCache.length > 0) {
+            return fallbackCache
+        } else {
+            try {
+                console.warn(`[FALLBACK-RSS] Tentando buscar via RSS canal ${channelId}...`)
+                let rssVideos = await rssService.fetchChannelVideosViaRSS(channelId)
+                return rssVideos
+            } catch (rssErr) {
+                console.warn(`[FALLBACK-RSS] Falha buscar RSS canal ${channelId}:`, rssErr)
+                return []
+            }
+        }
     }
 }
 

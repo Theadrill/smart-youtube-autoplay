@@ -1,8 +1,4 @@
 // public/client.js
-// Versão com prefetch do próximo vídeo para reduzir gap entre vídeos.
-// Usa endpoints: GET /api/next e POST /api/played
-// Vanilla JS, sem dependências externas.
-
 ;(function () {
     // -------------------------
     // Configurações locais
@@ -22,8 +18,7 @@
     }
     function debug(text) {
         if (debugEl) debugEl.innerText = typeof text === "string" ? text : JSON.stringify(text, null, 2)
-
-        definirInterval(text)
+        console.log("[DEBUG]", text)
     }
 
     // -------------------------
@@ -34,9 +29,9 @@
     let upcoming = null
     let prefetchTimer = null
     let videoSafetyTimer = null
-    let isLoading = false
     let keepRunning = true
     let lastPrefetchAttempt = 0
+    let forcedIntervalTimer = null
 
     // -------------------------
     // Chamada ao servidor
@@ -47,9 +42,11 @@
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}))
                 overlay("Nenhum vídeo: " + (body.error || res.status))
+                console.warn("[SERVER] Nenhum vídeo:", body)
                 return null
             }
             const data = await res.json()
+            console.log("[SERVER] Próximo vídeo recebido:", data)
             return data
         } catch (err) {
             overlay("Erro rede ao buscar próximo. Tentando em " + PREFETCH_RETRY_MS / 1000 + "s")
@@ -68,6 +65,7 @@
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ videoId }),
             })
+            console.log("[MARK] Vídeo marcado como reproduzido:", videoId)
         } catch (err) {
             console.warn("Erro marcando played", err)
         }
@@ -84,15 +82,11 @@
         if (upcoming) return
 
         overlay("Pré-carregando próximo vídeo...")
+        console.log("[PREFETCH] Tentando buscar próximo...")
         try {
             const next = await fetchNextFromServer()
-            if (!next) {
-                setTimeout(() => {
-                    if (keepRunning) prefetchNext()
-                }, PREFETCH_RETRY_MS)
-                return
-            }
-            if (next.videoId === currentVideoId) {
+            if (!next || next.videoId === currentVideoId) {
+                console.log("[PREFETCH] Nenhum novo vídeo ou igual ao atual, retry em 2s")
                 setTimeout(() => {
                     if (keepRunning) prefetchNext()
                 }, 2000)
@@ -121,27 +115,20 @@
         if (upcoming) return
         try {
             if (!player || typeof player.getDuration !== "function") {
-                prefetchTimer = setTimeout(() => {
-                    schedulePrefetch()
-                }, 2000)
+                prefetchTimer = setTimeout(schedulePrefetch, 2000)
                 return
             }
             const duration = player.getDuration()
             if (!duration || isNaN(duration) || duration <= PRELOAD_SECONDS_BEFORE_END + 1) {
-                prefetchTimer = setTimeout(() => {
-                    prefetchNext()
-                }, 500)
+                prefetchTimer = setTimeout(prefetchNext, 500)
                 return
             }
             const whenMs = Math.max(200, (duration - PRELOAD_SECONDS_BEFORE_END) * 1000)
-            prefetchTimer = setTimeout(() => {
-                prefetchNext()
-            }, whenMs)
+            console.log("[SCHEDULE] Prefetch agendado para daqui a", whenMs, "ms")
+            prefetchTimer = setTimeout(prefetchNext, whenMs)
         } catch (err) {
             console.warn("Erro schedulePrefetch", err)
-            prefetchTimer = setTimeout(() => {
-                schedulePrefetch()
-            }, SAFETY_PREFETCH_TIMEOUT_MS)
+            prefetchTimer = setTimeout(schedulePrefetch, SAFETY_PREFETCH_TIMEOUT_MS)
         }
     }
 
@@ -149,14 +136,10 @@
     // Limpa timers e estado relacionado ao vídeo atual
     // -------------------------
     function clearVideoState() {
-        if (prefetchTimer) {
-            clearTimeout(prefetchTimer)
-            prefetchTimer = null
-        }
-        if (videoSafetyTimer) {
-            clearTimeout(videoSafetyTimer)
-            videoSafetyTimer = null
-        }
+        if (prefetchTimer) clearTimeout(prefetchTimer)
+        if (videoSafetyTimer) clearTimeout(videoSafetyTimer)
+        if (forcedIntervalTimer) clearTimeout(forcedIntervalTimer)
+        prefetchTimer = videoSafetyTimer = forcedIntervalTimer = null
     }
 
     // -------------------------
@@ -167,68 +150,63 @@
         overlay("Tocando: " + (meta.title || videoId))
         debug({ currentVideoId, meta })
 
+        // Determina o tempo inicial
+        let startSeconds = 0
+        if (meta.durationSeconds >= 1800) {
+            // 30 minutos = 1800 segundos
+            startSeconds = 300 // começa em 5 minutos
+            console.log("[PLAY] Vídeo longo detectado, iniciando em 5 minutos:", startSeconds)
+        }
+
         if (player) {
             try {
-                isLoading = true
-                player.loadVideoById({ videoId: videoId, startSeconds: 0 })
+                player.loadVideoById({ videoId, startSeconds })
             } catch (err) {
                 console.warn("Erro player.loadVideoById, recriando player", err)
                 try {
                     player.destroy()
                 } catch (e) {}
                 player = null
-            } finally {
-                isLoading = false
             }
         }
 
         if (!player) {
-            isLoading = true
             player = new YT.Player("player", {
                 height: "100%",
                 width: "100%",
-                videoId: videoId,
+                videoId,
                 playerVars: {
                     autoplay: 1,
                     controls: 0,
                     modestbranding: 1,
                     rel: 0,
                     playsinline: 1,
+                    start: startSeconds, // garante compatibilidade
                 },
                 events: {
                     onReady: function (e) {
-                        try {
-                            e.target.mute()
-                            e.target.playVideo()
-                        } catch (err) {
-                            console.warn("onReady error", err)
-                        }
+                        e.target.mute()
+                        e.target.playVideo()
+                        console.log("[PLAYER] Pronto e tocando em", startSeconds, "segundos")
                         schedulePrefetch()
                         startVideoSafetyTimer()
+                        startForcedInterval(meta)
                     },
                     onStateChange: function (e) {
-                        if (e.data === YT.PlayerState.ENDED) {
-                            handleVideoEnded()
-                        }
-                        if (e.data === YT.PlayerState.ERROR) {
-                            console.warn("Player reported ERROR state. Pulando para o próximo.")
-                            handleVideoErrored()
-                        }
-                        if (e.data === YT.PlayerState.PLAYING) {
-                            schedulePrefetch()
-                        }
+                        if (e.data === YT.PlayerState.ENDED) handleVideoEnded()
+                        if (e.data === YT.PlayerState.ERROR) handleVideoErrored()
+                        if (e.data === YT.PlayerState.PLAYING) schedulePrefetch()
                     },
-                    // ADICIONADO: trata toda situação de vídeo bloqueado/indisponível
                     onError: function (e) {
-                        console.warn("onError disparado pelo player (vídeo indisponível ou bloqueado)", e)
+                        console.warn("[PLAYER] Erro detectado", e)
                         handleVideoErrored()
                     },
                 },
             })
-            isLoading = false
         } else {
             schedulePrefetch()
             startVideoSafetyTimer()
+            startForcedInterval(meta)
         }
     }
 
@@ -238,7 +216,7 @@
     function startVideoSafetyTimer() {
         if (videoSafetyTimer) clearTimeout(videoSafetyTimer)
         videoSafetyTimer = setTimeout(() => {
-            console.warn("Safety timeout atingido para vídeo", currentVideoId, ". Forçando próximo.")
+            console.warn("[SAFETY] Timeout atingido, pulando vídeo:", currentVideoId)
             forceSkipCurrent()
         }, SAFETY_VIDEO_TIMEOUT_MS)
     }
@@ -247,14 +225,15 @@
     // Força pular o vídeo atual
     // -------------------------
     function forceSkipCurrent() {
+        console.log("[FORCE] Pulando vídeo atual:", currentVideoId)
         try {
             if (player && typeof player.stopVideo === "function") player.stopVideo()
-        } catch (err) {
-            console.warn("Erro stopVideo", err)
+        } catch (e) {
+            console.warn(e)
         }
         try {
             if (player && typeof player.destroy === "function") player.destroy()
-        } catch (err) {}
+        } catch (e) {}
         player = null
         clearVideoState()
         proceedToNext()
@@ -264,11 +243,8 @@
     // Quando o vídeo termina naturalmente
     // -------------------------
     async function handleVideoEnded() {
-        try {
-            await markPlayed(currentVideoId)
-        } catch (e) {
-            console.warn(e)
-        }
+        console.log("[ENDED] Vídeo terminou:", currentVideoId)
+        await markPlayed(currentVideoId)
         clearVideoState()
         if (upcoming && upcoming.videoId) {
             const next = upcoming
@@ -280,9 +256,10 @@
     }
 
     // -------------------------
-    // Quando o player reporta erro (ex.: embed blocked)
+    // Quando o player reporta erro
     // -------------------------
     function handleVideoErrored() {
+        console.warn("[ERROR] Vídeo erro:", currentVideoId)
         clearVideoState()
         try {
             if (player && typeof player.destroy === "function") player.destroy()
@@ -298,49 +275,63 @@
     }
 
     // -------------------------
-    // Busca / usa próximo vídeo quando não há upcoming
+    // Busca / usa próximo vídeo
     // -------------------------
     async function proceedToNext() {
         overlay("Buscando próximo vídeo...")
         let next = await fetchNextFromServer()
         if (!next) {
-            setTimeout(async () => {
-                next = await fetchNextFromServer()
-                if (!next) {
-                    overlay("Falha ao buscar próximo. Tentando novamente...")
-                    setTimeout(() => {
-                        if (keepRunning) proceedToNext()
-                    }, PREFETCH_RETRY_MS)
-                    return
-                }
-                playVideoById(next.videoId, next)
-            }, PREFETCH_RETRY_MS)
+            console.warn("[NEXT] Nenhum próximo vídeo encontrado, retry...")
+            setTimeout(proceedToNext, PREFETCH_RETRY_MS)
             return
         }
         playVideoById(next.videoId, next)
     }
 
+    // -------------------------
+    // Função de “intervalo forçado” baseada na duração
+    // -------------------------
+    function startForcedInterval(meta) {
+        if (forcedIntervalTimer) clearTimeout(forcedIntervalTimer)
+        if (!meta.durationSeconds) return
+        let interval = meta.durationSeconds < 600 ? 300000 : 600000 // 5 ou 10 min
+        console.log("[FORCED INTERVAL] Intervalo definido para", interval, "ms")
+        forcedIntervalTimer = setTimeout(forceSkipCurrent, interval)
+    }
+
+    // -------------------------
+    // Navegação via teclado
+    // -------------------------
+    document.addEventListener("keydown", (e) => {
+        if (e.code === "ArrowRight") {
+            e.preventDefault()
+            forceSkipCurrent()
+        }
+    })
+
+    // -------------------------
+    // YouTube API
+    // -------------------------
     window.onYouTubeIframeAPIReady = function () {
-        console.log("YouTube Iframe API pronta")
+        console.log("[API] YouTube Iframe API pronta")
         proceedToNext()
     }
 
+    // -------------------------
+    // DOMContentLoaded: fullscreen e botões
+    // -------------------------
     document.addEventListener("DOMContentLoaded", () => {
         const btnFull = document.getElementById("btn-full")
         const btnNext = document.getElementById("btn-next")
         if (btnFull)
             btnFull.addEventListener("click", () => {
                 const el = document.getElementById("player")
-                if (!el) return
                 if (el.requestFullscreen) el.requestFullscreen()
                 else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen()
                 else if (el.mozRequestFullScreen) el.mozRequestFullScreen()
                 else if (el.msRequestFullscreen) el.msRequestFullscreen()
             })
-        if (btnNext)
-            btnNext.addEventListener("click", () => {
-                forceSkipCurrent()
-            })
+        if (btnNext) btnNext.addEventListener("click", () => forceSkipCurrent())
 
         const tryFs = () => {
             const el = document.getElementById("player")
@@ -362,35 +353,4 @@
         } catch (e) {}
         player = null
     })
-
-    // -------------------------
-    // Navegação via teclado
-    // -------------------------
-    document.addEventListener("keydown", (e) => {
-        if (e.code === "ArrowRight") {
-            e.preventDefault() // impede ação do player YouTube
-            forceSkipCurrent() // força carregar próximo vídeo
-        } else if (e.code === "ArrowLeft") {
-            e.preventDefault()
-            // opcional: voltar ao vídeo anterior, se implementar histórico
-        }
-    })
-
-    function definirInterval(text) {
-        console.log(text.meta.durationSeconds)
-
-        let interval = 300000
-
-        if (text.meta.durationSeconds < 600) {
-            interval = 300000
-        } else {
-            interval = 600000
-        }
-
-        setInterval(() => {
-            forceSkipCurrent()
-        }, interval)
-
-        console.log(interval)
-    }
 })()

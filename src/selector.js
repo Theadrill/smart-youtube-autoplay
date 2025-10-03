@@ -39,7 +39,7 @@ function withinMaxAge(published, maxYears) {
     return published >= cutoff
 }
 
-// --- NOVA VERSÃO: busca todos os canais primeiro ---
+// --- NOVA VERSÃO: busca todos os canais primeiro com prioridade para canais não tocados ---
 async function getNextVideo() {
     const cfg = loadConfig()
     const played = loadPlayed()
@@ -57,6 +57,9 @@ async function getNextVideo() {
     if (!global.__sya_cache) global.__sya_cache = { fetchedAt: {}, videos: {} }
 
     const allCandidates = []
+    const channelHasPlayed = {}
+
+    console.log(`[INFO] Iniciando busca de vídeos. Total de canais: ${channels.length}`)
 
     // --- percorre todos os canais ---
     for (const channel of channels) {
@@ -71,10 +74,12 @@ async function getNextVideo() {
             } else {
                 try {
                     videos = await youtubeApi.fetchChannelVideosViaApi(channel.id)
+                    console.log(`[API] Canal ${channel.id}: vídeos obtidos via API: ${videos.length}`)
                 } catch (apiErr) {
                     console.warn(`[API] Erro API canal ${channel.id}, tentando RSS`, apiErr)
                     try {
                         videos = await rssService.fetchChannelVideosViaRSS(channel.id)
+                        console.log(`[RSS] Canal ${channel.id}: vídeos obtidos via RSS: ${videos.length}`)
                     } catch (rssErr) {
                         console.warn(`[RSS] Erro RSS canal ${channel.id}`, rssErr)
                         videos = global.__sya_cache.videos[channel.id] || []
@@ -92,10 +97,18 @@ async function getNextVideo() {
             candidates = candidates.filter((v) => !(played[v.id] && played[v.id] >= now() - playedResetDays * 24 * 60 * 60 * 1000))
             if (minViews > 0) candidates = candidates.filter((v) => (v.viewCount || 0) >= minViews)
 
-            console.log(`[CANDIDATES] Canal ${channel.id}: ${candidates.length} vídeos após filtros`)
+            console.log(`[FILTER] Canal ${channel.id}: ${candidates.length}/${videos.length} vídeos após filtros`)
 
-            // adiciona ao pool geral
-            allCandidates.push(...candidates.map((v) => ({ ...v, weight: channel.weight || 1 })))
+            // registra se o canal já teve algum vídeo tocado
+            const hasPlayedAny = videos.some((v) => played[v.id])
+            channelHasPlayed[channel.id] = hasPlayedAny
+            if (hasPlayedAny) {
+                console.log(`[INFO] Canal ${channel.id} já teve vídeos tocados`)
+            } else {
+                console.log(`[INFO] Canal ${channel.id} ainda não teve vídeos tocados`)
+            }
+
+            allCandidates.push(...candidates.map((v) => ({ ...v, weight: channel.weight || 1, channelId: channel.id })))
         } catch (err) {
             console.warn(`[ERROR] ao processar canal ${channel.id}:`, err)
         }
@@ -103,11 +116,10 @@ async function getNextVideo() {
 
     if (allCandidates.length === 0) {
         console.warn("[NEXT] Nenhum vídeo candidato encontrado após filtros, relaxando regras...")
-        // relax: pegar qualquer vídeo recente de qualquer canal, ignorando views e played
         for (const channel of channels) {
             const videos = global.__sya_cache.videos[channel.id] || []
             const candidates = videos.filter((v) => withinMaxAge(v.published, maxAgeYears))
-            allCandidates.push(...candidates.map((v) => ({ ...v, weight: channel.weight || 1 })))
+            allCandidates.push(...candidates.map((v) => ({ ...v, weight: channel.weight || 1, channelId: channel.id })))
         }
     }
 
@@ -116,15 +128,21 @@ async function getNextVideo() {
         return null
     }
 
+    // --- PRIORIDADE: canais que ainda não tiveram vídeos tocados ---
+    const untouchedCandidates = allCandidates.filter((v) => !channelHasPlayed[v.channelId])
+    console.log(`[PRIORITY] Vídeos de canais não tocados: ${untouchedCandidates.length}/${allCandidates.length}`)
+
+    const finalPool = untouchedCandidates.length > 0 ? untouchedCandidates : allCandidates
+
     // --- pick weighted random ---
     const weightedPool = []
-    allCandidates.forEach((v) => {
+    finalPool.forEach((v) => {
         const w = Math.max(1, v.weight || 1)
         for (let i = 0; i < w; i++) weightedPool.push(v)
     })
 
     const chosen = weightedPool[Math.floor(Math.random() * weightedPool.length)]
-    console.log(`[NEXT] Escolhido vídeo: ${chosen.title} (canal ${chosen.channelId})`)
+    console.log(`[NEXT] Escolhido vídeo: ${chosen.title} (canal ${chosen.channelId}, peso ${chosen.weight})`)
 
     return {
         videoId: chosen.id,
@@ -141,6 +159,7 @@ function markPlayed(videoId) {
     const played = loadPlayed()
     played[videoId] = now()
     savePlayed(played)
+    console.log(`[MARK PLAYED] Vídeo ${videoId} marcado como reproduzido`)
 }
 
 module.exports = {

@@ -79,8 +79,8 @@ async function fetchChannelVideosViaApi(channelId) {
             const r1 = await fetch(searchUrl)
             if (!r1.ok) {
                 const txt = await r1.text().catch(() => null)
-                // QUOTA EXCEDIDA: tenta cache local e fallback para RSS
-                if (r1.status === 403 && txt && txt.includes("quota")) {
+                if (r1.status === 403 && txt && txt.toLowerCase().includes("quota")) {
+                    console.error(`[API-ERROR] Quota da API excedida para canal ${channelId} na página ${page}. Usando fallback.`)
                     let fallbackCache = getVideosFromLocalCache(channelId)
                     if (fallbackCache && fallbackCache.length > 0) {
                         return fallbackCache
@@ -99,6 +99,16 @@ async function fetchChannelVideosViaApi(channelId) {
             }
 
             const data = await r1.json()
+
+            // Detecta quota excedida na mensagem de erro JSON, caso exista
+            if (data.error && data.error.errors) {
+                data.error.errors.forEach((e) => {
+                    if (e.reason === "quotaExceeded") {
+                        console.error(`[API-ERROR] Quota excedida detectada para canal ${channelId} na página ${page}`)
+                    }
+                })
+            }
+
             const ids = (data.items || []).map((i) => i.id.videoId).filter(Boolean)
             console.log(`[API] Canal ${channelId}: página ${page}, IDs obtidos: ${ids.length}`)
 
@@ -162,7 +172,7 @@ async function fetchChannelVideosViaApi(channelId) {
 
         return filteredVideos
     } catch (err) {
-        console.error(`[ERROR] fetchChannelVideosViaApi canal ${channelId}:`, err)
+        console.error(`[ERROR] fetchChannelVideosViaApi canal ${channelId}: ${err.message}`, err)
         // Tenta fallback: cache local
         let fallbackCache = getVideosFromLocalCache(channelId)
         if (fallbackCache && fallbackCache.length > 0) {

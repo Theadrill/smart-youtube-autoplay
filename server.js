@@ -1,4 +1,3 @@
-// AIzaSyAubC6PU-_r8uF3kRKLqZRLk8gD4YO_744
 // server.js
 const express = require("express")
 const bodyParser = require("body-parser")

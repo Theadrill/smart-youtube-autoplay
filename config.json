@@ -3,15 +3,86 @@
     "channels": [
         {
             "id": "UCUepfNS65Pyu73U5b6pTxIA",
-            "title": "Exemplo Canal",
+            "weight": 2
+        },
+        {
+            "id": "UCRpuxdZGkUpiqPfsrqe1xoQ",
+            "weight": 2
+        },
+        {
+            "id": "UCYBzFzzMSakhooSpnrodFhA",
+            "weight": 2
+        },
+        {
+            "id": "UCRVrcSqDGjCG_SjO4EvpPHw",
+            "weight": 1
+        },
+        {
+            "id": "UCQMle4QI2zJuOI5W5TOyOcQ",
+            "weight": 1
+        },
+        {
+            "id": "UC5G6kTnHXDz0WIBC2VGBOqg",
+            "weight": 1
+        },
+        {
+            "id": "UCKwIWByGLhE8tuUIjddZt5Q",
+            "weight": 1
+        },
+        {
+            "id": "UCEyhjwzaLXLHulsLPiOnmvw",
+            "weight": 1
+        },
+        {
+            "id": "UCT3G4XgKeR-0mugp09phhHA",
+            "weight": 1
+        },
+        {
+            "id": "UCXqlds5f7B2OOs9vQuevl4A",
+            "weight": 1
+        },
+        {
+            "id": "UCexoonWpGA1nwQctHsDv7ZQ",
+            "weight": 1
+        },
+        {
+            "id": "UCTv-XvfzLX3i4IGWAm4sbmA",
+            "weight": 1
+        },
+        {
+            "id": "UCPeXBhwpkTByFzave7JTPpQ",
+            "weight": 1
+        },
+        {
+            "id": "UCyuLjFPzlkMSYJpIpY8M6qA",
+            "weight": 1
+        },
+        {
+            "id": "UCFHE5FRBeksxt7YoFPGeKPw",
+            "weight": 1
+        },
+        {
+            "id": "UCo5F2AJ959ye_j4646lHkSA ",
+            "weight": 1
+        },
+        {
+            "id": "UCblfuW_4rakIf2h6aqANefA",
+            "weight": 1
+        },
+        {
+            "id": "UCmXfc1s9I_fwa0_GW_vm4OA",
+            "weight": 1
+        },
+        {
+            "id": "UCEGNa931UjJEZnTZ8afMmfA",
             "weight": 1
         }
     ],
     "maxAgeYears": 5,
     "minViews": 1000,
-    "minDurationSeconds": 182,
+    "minDurationSeconds": 240,
     "cacheTtlMinutes": 15,
     "playedResetDays": 60,
-    "maxSearchResults": 100,
+    "maxSearchResults": 50,
     "attemptsBeforeRelax": 6
 }

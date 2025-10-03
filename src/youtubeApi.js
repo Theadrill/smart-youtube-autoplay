@@ -1,21 +1,17 @@
-// src/youtubeApi.js
 const fetch = require("node-fetch")
 const fs = require("fs")
 const path = require("path")
 const { readJsonSafe } = require("./storage")
 const storage = require("./storage")
 
-// lê a config para minDurationSeconds
+// lê a config
 const config = readJsonSafe(storage.configPath, {})
 const minDurationSeconds = config.minDurationSeconds || 0
+const maxSearchResults = config.maxSearchResults || 100
+const cacheTtlMinutes = config.cacheTtlMinutes || 15
 
 // caminho do cache de vídeos por canal
 const cachePath = path.join(__dirname, "channelCache.json")
-
-function getApiKey() {
-    const creds = readJsonSafe(storage.credentialsPath, {})
-    return creds.YOUTUBE_API_KEY || ""
-}
 
 // helper: duration ISO8601 -> seconds
 function isoDurationToSeconds(iso) {
@@ -27,12 +23,17 @@ function isoDurationToSeconds(iso) {
     return hours * 3600 + mins * 60 + secs
 }
 
-// busca vídeos recentes do canal (search.list -> videos.list para detalhes)
-async function fetchChannelVideosViaApi(channelId, maxResults = 100) {
+function getApiKey() {
+    const creds = readJsonSafe(storage.credentialsPath, {})
+    return creds.YOUTUBE_API_KEY || ""
+}
+
+// Função principal para buscar vídeos de um canal
+async function fetchChannelVideosViaApi(channelId) {
     const key = getApiKey()
     if (!key) throw new Error("No API key")
 
-    // TENTA CARREGAR CACHE
+    // tenta carregar cache
     let cache = {}
     try {
         cache = JSON.parse(fs.readFileSync(cachePath, "utf-8"))
@@ -41,52 +42,77 @@ async function fetchChannelVideosViaApi(channelId, maxResults = 100) {
     }
 
     const now = Date.now()
-    const oneDay = 24 * 60 * 60 * 1000
+    const cacheTtlMs = cacheTtlMinutes * 60 * 1000
 
-    if (cache[channelId] && now - cache[channelId].lastFetch < oneDay) {
-        console.log(`[CACHE] Usando cache do canal ${channelId}`)
+    if (cache[channelId] && now - cache[channelId].lastFetch < cacheTtlMs) {
+        const ageMs = now - cache[channelId].lastFetch
+        console.log(`[CACHE] Canal ${channelId}: usando cache com ${(ageMs / 1000 / 60).toFixed(1)} min de idade`)
         return cache[channelId].videos
     }
 
-    // se não tiver cache ou estiver expirado, busca na API
     try {
         console.log(`[API] Buscando vídeos do canal ${channelId}`)
-        // search.list para pegar IDs
-        const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${channelId}&maxResults=${Math.min(maxResults, 100)}&order=date&type=video&key=${key}`
-        const r1 = await fetch(searchUrl)
-        if (!r1.ok) {
-            const txt = await r1.text().catch(() => null)
-            throw new Error("search.list failed: " + r1.status + " " + txt)
-        }
-        const data = await r1.json()
-        const ids = (data.items || []).map((i) => i.id.videoId).filter(Boolean)
-        if (ids.length === 0) return []
+        let videos = []
+        let totalFetched = 0
+        let nextPageToken = undefined
+        let page = 0
 
-        // videos.list para detalhes
-        const idsParam = ids.join(",")
-        const videosUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics,status&id=${encodeURIComponent(idsParam)}&key=${key}`
-        const r2 = await fetch(videosUrl)
-        if (!r2.ok) {
-            const txt = await r2.text().catch(() => null)
-            throw new Error("videos.list failed: " + r2.status + " " + txt)
-        }
-        const vd = await r2.json()
+        do {
+            page++
+            const fetchCount = Math.min(50, maxSearchResults - totalFetched)
+            const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${channelId}&maxResults=${fetchCount}&order=date&type=video${nextPageToken ? `&pageToken=${nextPageToken}` : ""}&key=${key}`
 
-        const videos = (vd.items || []).map((item) => {
-            const durationSec = item.contentDetails ? isoDurationToSeconds(item.contentDetails.duration) : null
-
-            return {
-                id: item.id,
-                title: item.snippet && item.snippet.title,
-                published: item.snippet && Date.parse(item.snippet.publishedAt),
-                durationSeconds: durationSec,
-                viewCount: item.statistics && item.statistics.viewCount ? parseInt(item.statistics.viewCount, 10) : 0,
-                embeddable: item.status && typeof item.status.embeddable !== "undefined" ? Boolean(item.status.embeddable) : null,
-                channelId: item.snippet && item.snippet.channelId,
+            const r1 = await fetch(searchUrl)
+            if (!r1.ok) {
+                const txt = await r1.text().catch(() => null)
+                throw new Error(`search.list failed: ${r1.status} ${txt}`)
             }
-        })
 
-        // filtra vídeos curtos (Shorts)
+            const data = await r1.json()
+            const ids = (data.items || []).map((i) => i.id.videoId).filter(Boolean)
+            console.log(`[API] Canal ${channelId}: página ${page}, IDs obtidos: ${ids.length}`)
+
+            if (!ids.length) break
+
+            // busca detalhes
+            const idsParam = ids.join(",")
+            const videosUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics,status&id=${encodeURIComponent(idsParam)}&key=${key}`
+            const r2 = await fetch(videosUrl)
+            if (!r2.ok) {
+                const txt = await r2.text().catch(() => null)
+                throw new Error(`videos.list failed: ${r2.status} ${txt}`)
+            }
+
+            const vd = await r2.json()
+            const fetchedVideos = (vd.items || []).map((item) => {
+                const durationSec = item.contentDetails ? isoDurationToSeconds(item.contentDetails.duration) : null
+                return {
+                    id: item.id,
+                    title: item.snippet?.title,
+                    published: item.snippet ? Date.parse(item.snippet.publishedAt) : null,
+                    durationSeconds: durationSec,
+                    viewCount: item.statistics?.viewCount ? parseInt(item.statistics.viewCount, 10) : 0,
+                    embeddable: item.status?.embeddable ?? null,
+                    channelId: item.snippet?.channelId,
+                }
+            })
+
+            videos = [...videos, ...fetchedVideos]
+            totalFetched += fetchedVideos.length
+            console.log(`[API] Canal ${channelId}: vídeos acumulados: ${videos.length}`)
+
+            nextPageToken = data.nextPageToken
+            if (!nextPageToken) {
+                console.log(`[API] Canal ${channelId}: última página atingida.`)
+                break
+            }
+            if (totalFetched >= maxSearchResults) {
+                console.log(`[API] Canal ${channelId}: atingido maxSearchResults (${maxSearchResults})`)
+                break
+            }
+        } while (true)
+
+        // filtra vídeos curtos
         const filteredVideos = videos.filter((v) => {
             if (v.durationSeconds === null) return false
             if (v.durationSeconds < minDurationSeconds) {
@@ -96,7 +122,9 @@ async function fetchChannelVideosViaApi(channelId, maxResults = 100) {
             return true
         })
 
-        // ATUALIZA CACHE
+        console.log(`[API] Canal ${channelId}: total vídeos válidos após filtro: ${filteredVideos.length}`)
+
+        // atualiza cache
         cache[channelId] = {
             lastFetch: now,
             videos: filteredVideos,
@@ -105,7 +133,8 @@ async function fetchChannelVideosViaApi(channelId, maxResults = 100) {
 
         return filteredVideos
     } catch (err) {
-        throw err
+        console.error(`[ERROR] fetchChannelVideosViaApi canal ${channelId}:`, err)
+        return []
     }
 }
 

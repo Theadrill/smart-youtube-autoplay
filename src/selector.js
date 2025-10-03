@@ -1,7 +1,6 @@
 // src/selector.js
 const storage = require("./storage")
 const { readJsonSafe, writeJsonSafe } = require("./storage")
-const path = require("path")
 const youtubeApi = require("./youtubeApi")
 const rssService = require("./rssService")
 
@@ -40,135 +39,107 @@ function withinMaxAge(published, maxYears) {
     return published >= cutoff
 }
 
-// main: getNextVideo — tenta API, fallback RSS, aplica regras e relaxa se necessário
-async function getNextVideo(options = {}) {
+// --- NOVA VERSÃO: busca todos os canais primeiro ---
+async function getNextVideo() {
     const cfg = loadConfig()
     const played = loadPlayed()
     const channels = cfg.channels || []
     const maxAgeYears = cfg.maxAgeYears || 2
     const minViews = cfg.minViews || 0
-    const cacheTtl = cfg.cacheTtlMinutes || 15
-    const attemptsBeforeRelax = cfg.attemptsBeforeRelax || 6
-    const maxSearchResults = cfg.maxSearchResults || 100
     const playedResetDays = cfg.playedResetDays || 60
+    const attemptsBeforeRelax = cfg.attemptsBeforeRelax || 6
+    const cacheTtl = cfg.cacheTtlMinutes || 15
+    const maxSearchResults = cfg.maxSearchResults || 100
 
     if (channels.length === 0) throw new Error("Nenhum canal configurado em config.json -> channels")
 
-    // simple in-memory cache (per runtime)
+    // --- CACHE EM MEMÓRIA ---
     if (!global.__sya_cache) global.__sya_cache = { fetchedAt: {}, videos: {} }
 
-    const tried = new Set()
-    let relax = false
-    let tries = 0
-    const maxTries = channels.length * 3
+    const allCandidates = []
 
-    while (tries < maxTries) {
-        tries++
-        const channel = pickWeightedChannel(channels)
-        if (!channel) break
-        if (tried.has(channel.id) && tried.size < channels.length) continue // prefer variety
-        tried.add(channel.id)
-
-        // caching: if cached and fresh, use it
-        const cacheEntry = global.__sya_cache.fetchedAt[channel.id]
-        const age = cacheEntry ? (Date.now() - cacheEntry) / (60 * 1000) : Infinity
-        let videos = []
+    // --- percorre todos os canais ---
+    for (const channel of channels) {
         try {
+            const cacheEntry = global.__sya_cache.fetchedAt[channel.id]
+            const age = cacheEntry ? (now() - cacheEntry) / (60 * 1000) : Infinity
+            let videos = []
+
             if (cacheEntry && age < cacheTtl) {
                 videos = global.__sya_cache.videos[channel.id] || []
+                console.log(`[CACHE] Canal ${channel.id}: usando cache com ${age.toFixed(1)} min de idade, vídeos: ${videos.length}`)
             } else {
-                // prefer API if available
                 try {
-                    const vids = await youtubeApi.fetchChannelVideosViaApi(channel.id, maxSearchResults)
-                    videos = vids
+                    videos = await youtubeApi.fetchChannelVideosViaApi(channel.id)
                 } catch (apiErr) {
-                    // fallback to RSS
+                    console.warn(`[API] Erro API canal ${channel.id}, tentando RSS`, apiErr)
                     try {
-                        const vids2 = await rssService.fetchChannelVideosViaRSS(channel.id)
-                        videos = vids2
+                        videos = await rssService.fetchChannelVideosViaRSS(channel.id)
                     } catch (rssErr) {
-                        // use whatever cached if exists
+                        console.warn(`[RSS] Erro RSS canal ${channel.id}`, rssErr)
                         videos = global.__sya_cache.videos[channel.id] || []
                     }
                 }
-                // update cache
-                global.__sya_cache.fetchedAt[channel.id] = Date.now()
+                global.__sya_cache.fetchedAt[channel.id] = now()
                 global.__sya_cache.videos[channel.id] = videos
             }
+
+            if (!videos || videos.length === 0) continue
+
+            // --- FILTROS ---
+            let candidates = videos.filter((v) => withinMaxAge(v.published, maxAgeYears))
+            candidates = candidates.filter((v) => v.durationSeconds !== null)
+            candidates = candidates.filter((v) => !(played[v.id] && played[v.id] >= now() - playedResetDays * 24 * 60 * 60 * 1000))
+            if (minViews > 0) candidates = candidates.filter((v) => (v.viewCount || 0) >= minViews)
+
+            console.log(`[CANDIDATES] Canal ${channel.id}: ${candidates.length} vídeos após filtros`)
+
+            // adiciona ao pool geral
+            allCandidates.push(...candidates.map((v) => ({ ...v, weight: channel.weight || 1 })))
         } catch (err) {
-            console.warn("Erro ao obter vídeos para canal", channel.id, err)
-            continue
-        }
-
-        if (!videos || videos.length === 0) continue
-
-        // Filter pipeline
-        // 1) by max age
-        let candidates = videos.filter((v) => withinMaxAge(v.published, maxAgeYears))
-
-        // 2) by embeddable true if available information exists
-        if (!relax) {
-            const withEmbeddableKnown = candidates.filter((v) => v.embeddable !== null)
-            if (withEmbeddableKnown.length > 0) {
-                candidates = candidates.filter((v) => v.embeddable === true)
-            }
-        }
-
-        // 3) by minViews if known
-        if (!relax && minViews > 0) {
-            const withViewsKnown = candidates.filter((v) => v.viewCount !== null && typeof v.viewCount === "number")
-            if (withViewsKnown.length > 0) {
-                candidates = candidates.filter((v) => (v.viewCount || 0) >= minViews)
-            }
-        }
-
-        // 4) exclude recently played
-        const playedCutoff = Date.now() - playedResetDays * 24 * 60 * 60 * 1000
-        candidates = candidates.filter((v) => !(played[v.id] && played[v.id] >= playedCutoff))
-
-        // if empty and we haven't relaxed yet, maybe set relax based on tried count
-        if (candidates.length === 0 && !relax) {
-            if (tried.size >= Math.min(attemptsBeforeRelax, channels.length)) {
-                relax = true
-            }
-        }
-
-        // if still empty but relax = true, progressively loosen filters
-        if (candidates.length === 0 && relax) {
-            // allow embeddable false/unknown and any view count, but keep maxAge
-            candidates = videos.filter((v) => withinMaxAge(v.published, maxAgeYears))
-        }
-
-        if (candidates.length === 0 && relax) {
-            // as last resort, allow ignoring maxAge entirely
-            candidates = videos.slice()
-        }
-
-        if (candidates.length === 0) continue
-
-        // pick random candidate
-        const chosen = candidates[Math.floor(Math.random() * candidates.length)]
-
-        // return minimal info
-        return {
-            videoId: chosen.id,
-            title: chosen.title,
-            channelId: chosen.channelId || channel.id,
-            published: chosen.published || null,
-            durationSeconds: chosen.durationSeconds || null,
-            viewCount: chosen.viewCount || null,
-            embeddable: chosen.embeddable,
+            console.warn(`[ERROR] ao processar canal ${channel.id}:`, err)
         }
     }
 
-    // Se nada encontrado:
-    return null
+    if (allCandidates.length === 0) {
+        console.warn("[NEXT] Nenhum vídeo candidato encontrado após filtros, relaxando regras...")
+        // relax: pegar qualquer vídeo recente de qualquer canal, ignorando views e played
+        for (const channel of channels) {
+            const videos = global.__sya_cache.videos[channel.id] || []
+            const candidates = videos.filter((v) => withinMaxAge(v.published, maxAgeYears))
+            allCandidates.push(...candidates.map((v) => ({ ...v, weight: channel.weight || 1 })))
+        }
+    }
+
+    if (allCandidates.length === 0) {
+        console.warn("[NEXT] Nenhum vídeo disponível mesmo após relax")
+        return null
+    }
+
+    // --- pick weighted random ---
+    const weightedPool = []
+    allCandidates.forEach((v) => {
+        const w = Math.max(1, v.weight || 1)
+        for (let i = 0; i < w; i++) weightedPool.push(v)
+    })
+
+    const chosen = weightedPool[Math.floor(Math.random() * weightedPool.length)]
+    console.log(`[NEXT] Escolhido vídeo: ${chosen.title} (canal ${chosen.channelId})`)
+
+    return {
+        videoId: chosen.id,
+        title: chosen.title,
+        channelId: chosen.channelId,
+        published: chosen.published || null,
+        durationSeconds: chosen.durationSeconds || null,
+        viewCount: chosen.viewCount || null,
+        embeddable: chosen.embeddable,
+    }
 }
 
-// mark played
 function markPlayed(videoId) {
     const played = loadPlayed()
-    played[videoId] = Date.now()
+    played[videoId] = now()
     savePlayed(played)
 }
 

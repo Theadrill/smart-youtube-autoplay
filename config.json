@@ -1,0 +1,17 @@
+{
+    "port": 3000,
+    "channels": [
+        {
+            "id": "UCUepfNS65Pyu73U5b6pTxIA",
+            "title": "Exemplo Canal",
+            "weight": 1
+        }
+    ],
+    "maxAgeYears": 5,
+    "minViews": 1000,
+    "minDurationSeconds": 182,
+    "cacheTtlMinutes": 15,
+    "playedResetDays": 60,
+    "maxSearchResults": 100,
+    "attemptsBeforeRelax": 6
+}

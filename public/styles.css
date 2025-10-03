@@ -1,0 +1,112 @@
+/* styles.css - estilos separados para o telão */
+
+:root {
+    --overlay-bg: rgba(0, 0, 0, 0.6);
+    --overlay-color: #ffffff;
+    --font-family: Arial, Helvetica, sans-serif;
+    --btn-bg: rgba(255, 255, 255, 0.06);
+    --btn-color: #fff;
+    --btn-border: rgba(255, 255, 255, 0.12);
+}
+
+/* Reset simples */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html,
+body {
+    height: 100%;
+    background: #000;
+    font-family: var(--font-family);
+    color: var(--overlay-color);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow: hidden;
+}
+
+/* Player ocupa toda a viewport */
+#player {
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    background: #000;
+}
+
+/* Overlay informativo */
+#overlay {
+    position: absolute;
+    left: 12px;
+    top: 12px;
+    z-index: 1002;
+    background: var(--overlay-bg);
+    color: var(--overlay-color);
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    line-height: 1.2;
+    max-width: 60vw;
+    word-break: break-word;
+}
+
+/* Controles (escondidos por padrão) */
+#controls {
+    position: absolute;
+    right: 12px;
+    top: 12px;
+    z-index: 1003;
+    display: flex;
+    gap: 8px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+#controls button {
+    background: var(--btn-bg);
+    color: var(--btn-color);
+    border: 1px solid var(--btn-border);
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: transform 0.08s ease, background 0.12s ease;
+}
+
+#controls button:active {
+    transform: translateY(1px);
+}
+
+#controls button:hover {
+    filter: brightness(1.06);
+}
+
+/* debug - informações técnicas (opcional) */
+#debug {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    z-index: 1001;
+    font-family: monospace;
+    font-size: 12px;
+    opacity: 0.85;
+    color: #ddd;
+    max-width: 95vw;
+    pointer-events: none;
+    white-space: pre-wrap;
+}
+
+/* responsividade mínima - garante legibilidade em telas pequenas */
+@media (max-width: 600px) {
+    #overlay {
+        font-size: 12px;
+        max-width: 80vw;
+    }
+    #controls button {
+        font-size: 12px;
+        padding: 6px 8px;
+    }
+}

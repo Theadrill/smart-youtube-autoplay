@@ -224,8 +224,11 @@
     // -------------------------
     // Força pular o vídeo atual
     // -------------------------
-    function forceSkipCurrent() {
+    async function forceSkipCurrent() {
         console.log("[FORCE] Pulando vídeo atual:", currentVideoId)
+        if (currentVideoId) {
+            await markPlayed(currentVideoId)
+        }
         try {
             if (player && typeof player.stopVideo === "function") player.stopVideo()
         } catch (e) {

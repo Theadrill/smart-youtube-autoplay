@@ -1,7 +1,7 @@
 /**
  * Script: createPlaylistFromCache.js
  * Sincroniza o cache local com uma playlist pública do YouTube.
- * - Usa somente a API do YouTube (sem RSS)
+ * - Usa somente a API do YouTube
  * - Mantém um arquivo local playlist.json com os IDs já adicionados
  * - Remove duplicados online e do arquivo local
  * - Adiciona apenas vídeos novos

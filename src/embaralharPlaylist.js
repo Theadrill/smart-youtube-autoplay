@@ -1,113 +1,68 @@
 /**
  * createShuffledPlaylist.js
  *
- * Cria uma playlist embaralhada com base no cache local (channelCache.json),
- * ou busca a playlist de origem se o cache não existir.
- * Sempre gera o JSON local (shuffle_job.json), mesmo se não houver autorização.
+ * Gera uma playlist embaralhada com base no channelCache.json (se existir),
+ * ou busca da playlist original se o cache não existir.
  */
 
 const fs = require("fs")
 const path = require("path")
 const readline = require("readline")
 const { google } = require("googleapis")
-const open = require("open") // Abre navegador automaticamente
 
-// === CONFIGURAÇÕES ===
 const SCOPES = ["https://www.googleapis.com/auth/youtube"]
 const CREDENTIALS_PATH = path.join(__dirname, "..", "credentials.json")
 const TOKEN_PATH = path.join(__dirname, "token.json")
-const CACHE_PATH = path.join(__dirname, "channelCache.json")
 const JOB_PATH = path.join(__dirname, "shuffle_job.json")
+const CACHE_PATH = path.join(__dirname, "channelCache.json")
 
-const SOURCE_PLAYLIST_ID = "PLYx0204ec-6F9oVb-ikW6RBpnDzAGZslZ"
+// === CONFIGURÁVEIS ===
+const SOURCE_PLAYLIST_ID = "PLYx0204ec-6F9oVb-ikW6RBpnDzAGZslZ" // playlist de origem
 const TARGET_PLAYLIST_TITLE = "Playlist Embaralhada - Smart Autoplay"
 const TARGET_PLAYLIST_DESCRIPTION = "Gerada automaticamente a partir do cache local."
 const TARGET_PLAYLIST_PRIVACY = "public"
 const BATCH_ADD_DELAY_MS = 1500
+// ======================
 
-// === HELPERS ===
-function readJsonSafe(file, def = null) {
+function readJsonSafe(p, def = null) {
     try {
-        if (!fs.existsSync(file)) return def
-        return JSON.parse(fs.readFileSync(file, "utf8"))
+        if (!fs.existsSync(p)) return def
+        return JSON.parse(fs.readFileSync(p, "utf8"))
     } catch {
         return def
     }
 }
 
-function writeJsonSafe(file, obj) {
-    fs.writeFileSync(file + ".tmp", JSON.stringify(obj, null, 2))
-    fs.renameSync(file + ".tmp", file)
+function writeJsonSafe(p, obj) {
+    fs.writeFileSync(p + ".tmp", JSON.stringify(obj, null, 2))
+    fs.renameSync(p + ".tmp", p)
 }
 
-function shuffleArray(arr) {
-    for (let i = arr.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1))
-        ;[arr[i], arr[j]] = [arr[j], arr[i]]
-    }
-}
-
-function groupByChannel(videos) {
-    const map = {}
-    for (const v of videos) {
-        if (!map[v.channelId]) map[v.channelId] = []
-        map[v.channelId].push(v.id)
-    }
-    return map
-}
-
-function buildRoundRobinShuffle(byChannel) {
-    const channels = Object.keys(byChannel)
-    for (const ch of channels) shuffleArray(byChannel[ch])
-
-    const shuffled = []
-    while (channels.length > 0) {
-        shuffleArray(channels)
-        for (let i = channels.length - 1; i >= 0; i--) {
-            const ch = channels[i]
-            const vids = byChannel[ch]
-            if (!vids.length) {
-                channels.splice(i, 1)
-                continue
-            }
-            shuffled.push(vids.pop())
-        }
-    }
-    return shuffled
-}
-
-// === GOOGLE AUTH ===
+// --- Autenticação Google ---
 async function getAuthenticatedClient() {
-    const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, "utf8"))
-    const { client_secret, client_id, redirect_uris } = credentials.installed || credentials.web
-    const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0])
+    const creds = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, "utf8"))
+    const data = creds.installed || creds.web
+    const oAuth2Client = new google.auth.OAuth2(data.client_id, data.client_secret, data.redirect_uris[0])
 
-    // Token existente
     if (fs.existsSync(TOKEN_PATH)) {
         oAuth2Client.setCredentials(readJsonSafe(TOKEN_PATH))
         return oAuth2Client
     }
 
-    // Se não houver token → abre navegador
     const authUrl = oAuth2Client.generateAuthUrl({
         access_type: "offline",
         scope: SCOPES,
         prompt: "consent",
     })
 
-    console.log("\n[AUTORIZAÇÃO] Abrindo navegador para autenticação...")
-    console.log("Se não abrir automaticamente, acesse manualmente:\n", authUrl)
-    await open(authUrl)
+    console.log("\nAbra este link e autorize o app:")
+    console.log(authUrl)
 
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-    })
-
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
     const code = await new Promise((resolve) =>
-        rl.question("\nCole aqui o código da URL (após 'code='): ", (ans) => {
+        rl.question("\nCole o código: ", (a) => {
             rl.close()
-            resolve(ans.trim())
+            resolve(a.trim())
         })
     )
 
@@ -118,7 +73,41 @@ async function getAuthenticatedClient() {
     return oAuth2Client
 }
 
-// === YOUTUBE API ===
+// --- Utilidades de shuffle ---
+function shuffleArrayInPlace(a) {
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1))
+        ;[a[i], a[j]] = [a[j], a[i]]
+    }
+}
+
+// regra de "1 vídeo por canal por rodada"
+function buildRoundRobinShuffle(byChannel) {
+    const channels = Object.keys(byChannel)
+    for (const ch of channels) shuffleArrayInPlace(byChannel[ch])
+
+    const out = []
+    while (channels.length > 0) {
+        shuffleArrayInPlace(channels)
+        for (let i = channels.length - 1; i >= 0; i--) {
+            const ch = channels[i]
+            const bucket = byChannel[ch]
+            if (!bucket || bucket.length === 0) {
+                channels.splice(i, 1)
+                delete byChannel[ch]
+                continue
+            }
+            out.push(bucket.pop())
+            if (bucket.length === 0) {
+                channels.splice(i, 1)
+                delete byChannel[ch]
+            }
+        }
+    }
+    return out
+}
+
+// --- API helpers ---
 async function fetchAllPlaylistVideos(youtube, playlistId) {
     const items = []
     let pageToken = null
@@ -132,7 +121,9 @@ async function fetchAllPlaylistVideos(youtube, playlistId) {
         for (const it of res.data.items || []) {
             const id = it.snippet?.resourceId?.videoId
             const channelId = it.snippet?.videoOwnerChannelId || it.snippet?.channelId
-            if (id && channelId) items.push({ id, channelId })
+            if (id && channelId) {
+                items.push({ id, channelId })
+            }
         }
         pageToken = res.data.nextPageToken
     } while (pageToken)
@@ -174,12 +165,24 @@ async function addVideoToPlaylist(youtube, playlistId, videoId) {
     })
 }
 
-// === PRINCIPAL ===
+function groupByChannel(items) {
+    const map = {}
+    for (const it of items) {
+        if (!map[it.channelId]) map[it.channelId] = []
+        map[it.channelId].push(it.id)
+    }
+    return map
+}
+
+// --- Principal ---
 async function main() {
+    const auth = await getAuthenticatedClient()
+    const youtube = google.youtube({ version: "v3", auth })
+
+    // 1️⃣ Tenta usar o channelCache.json
     let cache = readJsonSafe(CACHE_PATH, null)
     let videos = []
 
-    // 1️⃣ Usa cache local se existir
     if (cache && Object.keys(cache).length > 0) {
         console.log("[CACHE] Usando vídeos de", CACHE_PATH)
         for (const ch in cache) {
@@ -189,55 +192,55 @@ async function main() {
             }
         }
     } else {
-        console.error("[CACHE] Nenhum cache local encontrado. Impossível continuar.")
-        return
+        console.log("[CACHE] Cache não encontrado, buscando playlist via API...")
+        const fetched = await fetchAllPlaylistVideos(youtube, SOURCE_PLAYLIST_ID)
+        console.log(`[API] ${fetched.length} vídeos carregados da playlist.`)
+        cache = {}
+        for (const v of fetched) {
+            if (!cache[v.channelId]) cache[v.channelId] = { videos: [] }
+            cache[v.channelId].videos.push({ id: v.id })
+        }
+        writeJsonSafe(CACHE_PATH, cache)
+        videos = fetched
     }
 
     if (!videos.length) {
-        console.error("Nenhum vídeo encontrado no cache.")
+        console.error("Nenhum vídeo encontrado no cache ou playlist.")
         return
     }
 
-    // 2️⃣ Cria shuffle local — sempre executa, mesmo sem API
-    const grouped = groupByChannel(videos)
-    const shuffledIds = buildRoundRobinShuffle(grouped)
-    console.log(`[PLAN] Gerado shuffle local: ${shuffledIds.length} vídeos.`)
+    // 2️⃣ Monta o shuffle local
+    const byChannel = groupByChannel(videos)
+    const shuffledIds = buildRoundRobinShuffle(byChannel)
+    console.log(`[PLAN] Embaralhamento completo: ${shuffledIds.length} vídeos.`)
 
-    let job = readJsonSafe(JOB_PATH, null)
-    if (!job) {
-        job = {
-            sourcePlaylistId: SOURCE_PLAYLIST_ID,
-            targetPlaylistId: null,
-            shuffledIds,
-            addedIds: [],
-            nextIndex: 0,
-        }
-        writeJsonSafe(JOB_PATH, job)
-        console.log("[LOCAL] Novo shuffle salvo em", JOB_PATH)
-    } else {
-        console.log("[LOCAL] Reutilizando shuffle existente em", JOB_PATH)
+    // 3️⃣ Carrega ou cria job
+    let job = readJsonSafe(JOB_PATH, {
+        sourcePlaylistId: SOURCE_PLAYLIST_ID,
+        targetPlaylistId: null,
+        shuffledIds,
+        addedIds: [],
+        nextIndex: 0,
+    })
+
+    if (!job.shuffledIds || job.shuffledIds.length !== shuffledIds.length) {
+        job.shuffledIds = shuffledIds
+        job.nextIndex = 0
+        job.addedIds = []
     }
 
-    // 3️⃣ Tenta autenticar
-    let auth
-    try {
-        auth = await getAuthenticatedClient()
-    } catch (err) {
-        console.error("[ERRO AUTH]", err.message)
-        console.log("[INFO] Não foi possível autenticar. Somente o shuffle local foi gerado.")
-        return
-    }
-
-    const youtube = google.youtube({ version: "v3", auth })
+    // 4️⃣ Cria playlist destino se não existir
     const targetPlaylistId = await createPlaylistIfNeeded(youtube, job)
 
-    // 4️⃣ Adiciona vídeos gradualmente
+    // 5️⃣ Adiciona vídeos progressivamente
     for (let i = job.nextIndex; i < job.shuffledIds.length; i++) {
         const vid = job.shuffledIds[i]
-        if (job.addedIds.includes(vid)) continue
-
+        if (job.addedIds.includes(vid)) {
+            console.log(`[SKIP] ${vid} já adicionado.`)
+            continue
+        }
         try {
-            console.log(`[ADD] (${i + 1}/${job.shuffledIds.length}) ${vid}`)
+            console.log(`[ADD] (${i + 1}/${job.shuffledIds.length}) Adicionando ${vid}...`)
             await addVideoToPlaylist(youtube, targetPlaylistId, vid)
             job.addedIds.push(vid)
             job.nextIndex = i + 1
@@ -251,19 +254,14 @@ async function main() {
                 writeJsonSafe(JOB_PATH, job)
                 process.exit(0)
             }
-            if (msg.toLowerCase().includes("auth") || msg.toLowerCase().includes("unauthorized")) {
-                console.error("[STOP] Autorização expirada. Refaça o login e rode novamente.")
-                writeJsonSafe(JOB_PATH, job)
-                process.exit(0)
-            }
         }
     }
 
     console.log("✅ Processo concluído com sucesso!")
-    console.log(`🔗 Playlist final: https://www.youtube.com/playlist?list=${targetPlaylistId}`)
+    console.log("Playlist final:", `https://www.youtube.com/playlist?list=${targetPlaylistId}`)
 }
 
-main().catch((err) => {
-    console.error("[FATAL]", err)
+main().catch((e) => {
+    console.error("[FATAL]", e)
     process.exit(1)
 })
